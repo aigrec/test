@@ -80,6 +80,8 @@ class ShopeeClient:
         category_id: int,
         image_id_list: list[str],
         weight_kg: float,
+        days_to_ship: int = 2,
+        is_pre_order: bool = False,
     ) -> dict:
         body = {
             "item_name": item_name,
@@ -89,6 +91,7 @@ class ShopeeClient:
             "category_id": category_id,
             "image": {"image_id_list": image_id_list},
             "weight": weight_kg,
+            "pre_order": {"is_pre_order": is_pre_order, "days_to_ship": days_to_ship},
         }
         return self._request("POST", "/api/v2/product/add_item", json_body=body)
 

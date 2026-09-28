@@ -1,19 +1,36 @@
-"""Push a tracking number back to the marketplace once a SourcingTask has
-been marked shipped, so the eBay/Shopee order shows as fulfilled."""
+"""Track a SourcingTask through purchased -> arrived -> shipped, and push the
+tracking number back to the marketplace once it ships so the eBay/Shopee
+order shows as fulfilled."""
 
-from datetime import datetime, timezone
+from datetime import timedelta
 
 from sqlalchemy.orm import Session
 
 from ..clients.ebay import EbayClient
 from ..clients.shopee import ShopeeClient
 from ..models import SourcingTask
+from ..timeutil import utcnow
 
 
 def mark_purchased(session: Session, task: SourcingTask, actual_cost_jpy: float) -> SourcingTask:
     task.status = "purchased"
     task.actual_cost_jpy = actual_cost_jpy
-    task.purchased_at = datetime.now(timezone.utc)
+    now = utcnow()
+    task.purchased_at = now
+
+    product = task.order_item.product
+    lead_time_days = product.sourcing_lead_time_days if product else 3
+    task.expected_arrival_by = now + timedelta(days=lead_time_days)
+
+    session.commit()
+    return task
+
+
+def mark_arrived(session: Session, task: SourcingTask) -> SourcingTask:
+    """Call this once the item you bought on Mercari/Yahoo/Amazon has
+    physically arrived, before it goes back out to the end buyer."""
+    task.status = "arrived"
+    task.arrived_at = utcnow()
     session.commit()
     return task
 
@@ -29,7 +46,7 @@ def mark_shipped_and_notify(
     task.tracking_number = tracking_number
     task.carrier_code = carrier_code
     task.status = "shipped"
-    task.shipped_at = datetime.now(timezone.utc)
+    task.shipped_at = utcnow()
 
     order = task.order_item.order
     if order.marketplace == "ebay":

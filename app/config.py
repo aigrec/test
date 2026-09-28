@@ -1,3 +1,4 @@
+import json
 import os
 
 from dotenv import load_dotenv
@@ -24,6 +25,12 @@ class Settings:
     ebay_fulfillment_policy_id: str = os.getenv("EBAY_FULFILLMENT_POLICY_ID", "")
     ebay_payment_policy_id: str = os.getenv("EBAY_PAYMENT_POLICY_ID", "")
     ebay_return_policy_id: str = os.getenv("EBAY_RETURN_POLICY_ID", "")
+    # JSON object mapping {"<max handling days>": "<business policy id>"}, e.g.
+    # {"3": "policy-fast", "7": "policy-standard", "14": "policy-slow"}.
+    # Each policy must already exist in Seller Hub with that handling time.
+    ebay_fulfillment_policy_map: dict[int, str] = {
+        int(k): v for k, v in json.loads(os.getenv("EBAY_FULFILLMENT_POLICY_MAP", "{}")).items()
+    }
 
     # Shopee
     shopee_partner_id: str = os.getenv("SHOPEE_PARTNER_ID", "")
@@ -36,6 +43,10 @@ class Settings:
     default_target_margin_percent: float = float(os.getenv("DEFAULT_TARGET_MARGIN_PERCENT", "0.30"))
     default_fx_jpy_to_usd: float = float(os.getenv("DEFAULT_FX_JPY_TO_USD", "0.0067"))
     default_fx_jpy_to_myr: float = float(os.getenv("DEFAULT_FX_JPY_TO_MYR", "0.030"))
+
+    # Days added on top of a product's sourcing lead time for inspection,
+    # repackaging, and dropping off the outbound (international) shipment.
+    handling_buffer_days: int = int(os.getenv("HANDLING_BUFFER_DAYS", "2"))
 
 
 settings = Settings()

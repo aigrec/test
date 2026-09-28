@@ -7,8 +7,9 @@ from .clients.shopee import ShopeeClient
 from .config import settings
 from .db import get_session, init_db
 from .models import Product, SourcingTask
-from .services.fulfillment import mark_purchased, mark_shipped_and_notify
+from .services.fulfillment import mark_arrived, mark_purchased, mark_shipped_and_notify
 from .services.listing import list_on_ebay, list_on_shopee
+from .services.sourcing import is_task_overdue, task_deadline
 
 app = FastAPI(title="Dropship Ops")
 
@@ -57,6 +58,7 @@ class ProductIn(BaseModel):
     category_id_ebay: str = ""
     category_id_shopee: str = ""
     image_urls: str = ""
+    sourcing_lead_time_days: int = 3
 
 
 @app.post("/products")
@@ -76,12 +78,6 @@ def list_products(session: Session = Depends(db_session)):
     ]
 
 
-class EbayListingPolicies(BaseModel):
-    fulfillmentPolicyId: str
-    paymentPolicyId: str
-    returnPolicyId: str
-
-
 @app.post("/products/{product_id}/list/ebay")
 def create_ebay_listing(
     product_id: int,
@@ -92,12 +88,7 @@ def create_ebay_listing(
     product = session.get(Product, product_id)
     if not product:
         raise HTTPException(404, "product not found")
-    policies = {
-        "fulfillmentPolicyId": settings.ebay_fulfillment_policy_id,
-        "paymentPolicyId": settings.ebay_payment_policy_id,
-        "returnPolicyId": settings.ebay_return_policy_id,
-    }
-    listing = list_on_ebay(session, product, client, policies, target_margin_percent=target_margin_percent)
+    listing = list_on_ebay(session, product, client, target_margin_percent=target_margin_percent)
     return {"listing_id": listing.id, "price": listing.price, "currency": listing.currency}
 
 
@@ -117,10 +108,17 @@ def create_shopee_listing(
 
 
 @app.get("/sourcing-tasks")
-def list_sourcing_tasks(status: str | None = None, session: Session = Depends(db_session)):
+def list_sourcing_tasks(
+    status: str | None = None,
+    overdue_only: bool = False,
+    session: Session = Depends(db_session),
+):
     query = session.query(SourcingTask)
     if status:
         query = query.filter_by(status=status)
+    tasks = query.all()
+    if overdue_only:
+        tasks = [t for t in tasks if is_task_overdue(t)]
     return [
         {
             "id": t.id,
@@ -128,8 +126,13 @@ def list_sourcing_tasks(status: str | None = None, session: Session = Depends(db
             "source_platform": t.source_platform,
             "source_url": t.source_url,
             "estimated_cost_jpy": t.estimated_cost_jpy,
+            "actual_cost_jpy": t.actual_cost_jpy,
+            "expected_arrival_by": t.expected_arrival_by,
+            "arrived_at": t.arrived_at,
+            "deadline": task_deadline(t),
+            "is_overdue": is_task_overdue(t),
         }
-        for t in query.all()
+        for t in tasks
     ]
 
 
@@ -143,7 +146,18 @@ def purchase_sourcing_task(task_id: int, payload: PurchaseIn, session: Session =
     if not task:
         raise HTTPException(404, "sourcing task not found")
     mark_purchased(session, task, payload.actual_cost_jpy)
-    return {"id": task.id, "status": task.status}
+    return {"id": task.id, "status": task.status, "expected_arrival_by": task.expected_arrival_by}
+
+
+@app.post("/sourcing-tasks/{task_id}/arrived")
+def arrive_sourcing_task(task_id: int, session: Session = Depends(db_session)):
+    task = session.get(SourcingTask, task_id)
+    if not task:
+        raise HTTPException(404, "sourcing task not found")
+    if task.status != "purchased":
+        raise HTTPException(409, f"cannot mark arrived from status '{task.status}'")
+    mark_arrived(session, task)
+    return {"id": task.id, "status": task.status, "arrived_at": task.arrived_at}
 
 
 class ShipIn(BaseModel):

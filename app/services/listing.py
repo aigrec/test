@@ -1,13 +1,12 @@
 """Create/update listings on eBay and Shopee from a Product, using the
 pricing module to derive the selling price."""
 
-from datetime import datetime, timezone
-
 from sqlalchemy.orm import Session
 
 from ..clients.ebay import EbayClient
 from ..clients.shopee import ShopeeClient
 from ..config import settings
+from ..handling import HandlingEstimate, pick_ebay_fulfillment_policy, shopee_shipping_terms
 from ..models import Listing, Product
 from ..pricing import (
     EBAY_DEFAULT_FEES,
@@ -15,17 +14,27 @@ from ..pricing import (
     convert_currency,
     required_selling_price,
 )
+from ..timeutil import utcnow
 
 
 def _image_urls(product: Product) -> list[str]:
     return [u.strip() for u in product.image_urls.split(",") if u.strip()]
 
 
+def _resolve_ebay_fulfillment_policy_id(product: Product) -> str:
+    """Picks a business policy whose handling time actually covers how long
+    this product takes to source, so eBay's delivery estimate isn't a lie."""
+    if not settings.ebay_fulfillment_policy_map:
+        return settings.ebay_fulfillment_policy_id
+    total_days = HandlingEstimate(product.sourcing_lead_time_days, settings.handling_buffer_days).total_days
+    return pick_ebay_fulfillment_policy(total_days, settings.ebay_fulfillment_policy_map)
+
+
 def list_on_ebay(
     session: Session,
     product: Product,
     client: EbayClient,
-    listing_policies: dict,
+    listing_policies: dict | None = None,
     target_margin_percent: float | None = None,
     fx_rate: float | None = None,
 ) -> Listing:
@@ -34,6 +43,11 @@ def list_on_ebay(
     cost = convert_currency(product.cost_jpy, rate)
     shipping = convert_currency(product.shipping_cost_jpy, rate)
     price = round(required_selling_price(cost, shipping, EBAY_DEFAULT_FEES, margin), 2)
+
+    policies = dict(listing_policies) if listing_policies else {}
+    policies.setdefault("fulfillmentPolicyId", _resolve_ebay_fulfillment_policy_id(product))
+    policies.setdefault("paymentPolicyId", settings.ebay_payment_policy_id)
+    policies.setdefault("returnPolicyId", settings.ebay_return_policy_id)
 
     client.upsert_inventory_item(
         sku=product.sku,
@@ -49,7 +63,7 @@ def list_on_ebay(
         price=price,
         currency="USD",
         quantity=1,
-        listing_policies=listing_policies,
+        listing_policies=policies,
         merchant_location_key=settings.ebay_merchant_location_key,
     )
     client.publish_offer(offer_id)
@@ -62,7 +76,7 @@ def list_on_ebay(
         currency="USD",
         quantity=1,
         status="active",
-        last_synced_at=datetime.now(timezone.utc),
+        last_synced_at=utcnow(),
     )
     session.add(listing)
     session.commit()
@@ -82,6 +96,8 @@ def list_on_shopee(
     cost = convert_currency(product.cost_jpy, rate)
     shipping = convert_currency(product.shipping_cost_jpy, rate)
     price = round(required_selling_price(cost, shipping, SHOPEE_DEFAULT_FEES, margin), 2)
+    total_days = HandlingEstimate(product.sourcing_lead_time_days, settings.handling_buffer_days).total_days
+    days_to_ship, is_pre_order = shopee_shipping_terms(total_days)
 
     result = client.add_item(
         item_name=product.title,
@@ -91,6 +107,8 @@ def list_on_shopee(
         category_id=int(product.category_id_shopee or 0),
         image_id_list=image_id_list,
         weight_kg=max(product.weight_g, 1) / 1000.0,
+        days_to_ship=days_to_ship,
+        is_pre_order=is_pre_order,
     )
     item_id = result["response"]["item_id"]
 
@@ -102,7 +120,7 @@ def list_on_shopee(
         currency="MYR",
         quantity=1,
         status="active",
-        last_synced_at=datetime.now(timezone.utc),
+        last_synced_at=utcnow(),
     )
     session.add(listing)
     session.commit()
